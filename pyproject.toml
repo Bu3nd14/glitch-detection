@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glitch-detection-poc"
+version = "0.1.0"
+description = "Day 2 deterministic no-reference DSP glitch detection POC"
+requires-python = ">=3.12"
+dependencies = ["numpy>=1.26", "textual>=0.58"]
+
+[project.optional-dependencies]
+dev = ["mypy>=1.10", "ruff>=0.6"]
+
+[project.scripts]
+glitch-poc = "glitch_poc.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["glitch_poc*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.mypy]
+python_version = "3.12"
+files = ["glitch_poc"]
+check_untyped_defs = true
+warn_unused_ignores = true

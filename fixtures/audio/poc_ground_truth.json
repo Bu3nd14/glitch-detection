@@ -1,0 +1,90 @@
+{
+  "faults": [
+    {
+      "class": "click",
+      "formula": "0.38*exp(-k/10)*cos(pi*k)+0.12*exp(-k/36)*cos(2*pi*180*k/48000)",
+      "interval": {
+        "end": 108096,
+        "semantics": "half-open",
+        "start": 108000,
+        "unit": "frames"
+      },
+      "replacement": "both channels",
+      "seconds": {
+        "end": 2.252,
+        "start": 2.25
+      }
+    },
+    {
+      "class": "dropout",
+      "fade_in_frames": 240,
+      "fade_out_frames": 240,
+      "interval": {
+        "end": 218400,
+        "semantics": "half-open",
+        "start": 204000,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 4.55,
+        "start": 4.25
+      },
+      "zero_interval": {
+        "end": 218160,
+        "start": 204240
+      }
+    },
+    {
+      "class": "stutter",
+      "interval": {
+        "end": 320640,
+        "semantics": "half-open",
+        "start": 297600,
+        "unit": "frames"
+      },
+      "repetitions": 6,
+      "seconds": {
+        "end": 6.68,
+        "start": 6.2
+      },
+      "source_interval": {
+        "end": 297600,
+        "start": 293760
+      }
+    },
+    {
+      "class": "clipping",
+      "interval": {
+        "end": 422400,
+        "semantics": "half-open",
+        "start": 393600,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 8.8,
+        "start": 8.2
+      },
+      "transform": "clip(6*x_clean, -0.45, +0.45)"
+    }
+  ],
+  "files": {
+    "clean": {
+      "path": "poc_clean.wav",
+      "sha256": "febd52acbb9f96dd8fe4d4eee34107d87349e52091b3ead0229c37d22ec95ec9"
+    },
+    "corrupted": {
+      "path": "poc_corrupted.wav",
+      "sha256": "2ae990d463d71ee800e50d4bd15952c0b5293701f41ea0640330c42d829924b9"
+    }
+  },
+  "format": {
+    "channels": 2,
+    "codec": "PCM s16le",
+    "container": "WAV",
+    "duration_seconds": 10.0,
+    "frames": 480000,
+    "sample_rate_hz": 48000
+  },
+  "purpose": "Deterministic clean/reference and corrupted/observed WAV pair for the POC.",
+  "schema_version": 1
+}

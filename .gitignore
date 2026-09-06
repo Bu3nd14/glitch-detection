@@ -1,0 +1,6 @@
+.env
+.DS_Store
+.work/
+.mypy_cache/
+.ruff_cache/
+logs/
