@@ -101,6 +101,19 @@ The request payload is minified JSON with `temperature=0`, `num_predict=256`, an
 
 The allowed evidence features are type-specific: click uses `derivative_peak` and `context_rms`; clipping uses `near_peak_ratio` and `peak_level`; stutter uses `correlation_lag_80ms` and `rms_ratio`; dropout uses `rms`, `baseline_rms`, `rms_ratio`, and `floor_ratio`; loop uses `correlation_lag_500ms` and `correlation_lag_1000ms`.
 
+### Reading Gemma Feedback
+
+The DSP is the only authoritative component: it creates the event, its type,
+status, interval, raw score, and evidence. Gemma only describes whether those
+provided DSP facts tell a coherent story; it cannot change the DSP verdict.
+
+| Gemma field | Meaning |
+|---|---|
+| `coherent` | The supplied DSP features are compatible with the DSP event type. For example, a high near-peak ratio and a persistent plateau are coherent with `clipping`. |
+| `insufficient_evidence` | The supplied features do not support a reliable descriptive annotation. The DSP event remains unchanged. |
+| `error` | Gemma was unavailable or returned invalid output, such as on timeout, transport failure, invalid JSON, or schema validation failure. DSP, TUI, and audit continue. |
+| `confidence` | Gemma's `low`, `medium`, or `high` confidence in its own description based only on the supplied features. It is not a calibrated probability and does not alter the DSP raw score or status. |
+
 ## How To Run
 
 Requirements: Python 3.12+, FFmpeg on `PATH`, and Ollama only if you want Gemma annotations.
