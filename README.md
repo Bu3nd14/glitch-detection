@@ -114,6 +114,37 @@ provided DSP facts tell a coherent story; it cannot change the DSP verdict.
 | `error` | Gemma was unavailable or returned invalid output, such as on timeout, transport failure, invalid JSON, or schema validation failure. DSP, TUI, and audit continue. |
 | `confidence` | Gemma's `low`, `medium`, or `high` confidence in its own description based only on the supplied features. It is not a calibrated probability and does not alter the DSP raw score or status. |
 
+## Blind Test #1: Cloud Audio Model
+
+This is a separate offline experiment, not part of the TUI or authoritative DSP
+path. It tests whether a cloud audio model can diagnose the full audio file without
+being given the DSP result, ground truth, expected glitch types in the recording,
+or expected timestamps.
+
+| Field | Result |
+|---|---|
+| Date | 2026-09-06 |
+| Model | `gpt-audio-1.5` |
+| Input | Full `poc_corrupted.wav` WAV, 48 kHz stereo, sent as raw audio to Chat Completions |
+| Prompt | Neutral request to find audible technical glitches and return JSON; no recording-specific labels or timestamps were supplied |
+| Model output | One `dropout`, `0.60–0.65 s`, `high` confidence, described as a momentary loss of signal |
+| API usage | 100 audio prompt tokens, 81 text prompt tokens, 43 completion tokens |
+
+Post-hoc comparison, performed only after the model response:
+
+| Ground truth / DSP event | Expected interval | Blind model result |
+|---|---|---|
+| Click | `2.25 s` | Missed |
+| Dropout | `4.25–4.55 s` | Missed |
+| Stutter | `6.20–6.68 s` | Missed |
+| Clipping | `8.20–8.80 s` | Missed |
+| Model-only dropout | `0.60–0.65 s` | False positive |
+
+For this single blind run, the model produced zero event matches and one false
+positive, while the deterministic DSP matched the four injected events. This is an
+experimental observation, not a general claim about the model; repeat runs and
+additional corpora are needed before drawing broader conclusions.
+
 ## How To Run
 
 Requirements: Python 3.12+, FFmpeg on `PATH`, and Ollama only if you want Gemma annotations.
