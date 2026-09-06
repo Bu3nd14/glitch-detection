@@ -1,139 +1,168 @@
-# Audio glitch detection POC
+# Audio Glitch Detection POC
 
-Giorno 3: FFmpeg persistente decodifica PCM `f32le` 48 kHz stereo in un ring
-bounded; il consumer paced esegue il detector DSP no-reference autorevole
-`poc-d2-v2`. Il DSP è l'unica fonte di event ID, lifecycle, status, tipo, intervalli,
-score ed evidence. Gemma è un annotatore locale opzionale: non può modificare o
-sopprimere alcun evento DSP.
+This repository contains a local, deterministic proof of concept for audio glitch detection.
+It streams a fixture WAV through persistent FFmpeg, turns it into normalized stereo PCM at 48 kHz,
+processes 10 ms DSP hops, and writes append-only audit records. The runtime is for inspection,
+calibration, and local validation, not for repair or production deployment.
 
-Richiede Python 3.12+, FFmpeg nel `PATH`, e le dipendenze del progetto:
+It currently runs on one of two fixtures: `fixtures/audio/poc_clean.wav` or `fixtures/audio/poc_corrupted.wav`.
+The main entrypoint is `glitch-poc` (`glitch_poc.cli:main`). The active profile id is `poc-d2-v2`.
 
-```sh
-.work/venv/bin/python -m pip install -e .
-.work/venv/bin/python -m glitch_poc.cli clean --no-ui --duration 1
-.work/venv/bin/python -m glitch_poc.cli corrupted --no-ui --duration 10.5
-.work/venv/bin/python -m glitch_poc.cli corrupted --no-ui --gemma-annotations
+**Out of scope**: microphone capture, cloud inference, automatic repair, and live source/reference comparison in the UI.
+
+## Grounded Deterministic RAG
+
+The code uses a grounded deterministic pattern: DSP decides, Gemma annotates.
+`OllamaClient` only accepts consolidated `CLOSED` DSP events with status `detected` or `uncertain`.
+The model payload is canonical DSP facts plus selected evidence windows, not raw audio.
+The runtime tests also reject audio-like, path-like, and base64-like payloads.
+
+In production there is no raw-audio model path. Raw-audio negative control lives only in offline validation and tests,
+and it is not exposed by the CLI.
+
+## Architecture
+
+```text
+fixtures/audio/poc_*.wav
+        |
+        v
+FFmpeg decode/resample (48 kHz, stereo, f32le)
+        |
+        v
+PCMBlockRing  --->  SliceRuntime pacing  --->  DSPProcessor
+        |                                  |        |
+        |                                  |        +--> FeatureWindow evidence
+        |                                  |        +--> EventBuilder -> DSPEvent
+        |                                  |
+        |                                  +--> GemmaWorker / OllamaClient
+        |
+        +--> SessionAuditLogger -> logs/session-*.jsonl
 ```
 
-La TUI è 2x2 e prevede almeno un terminale 100x30; `q` esce. Non usa né
-richiede un dispositivo audio: il flusso avanza comunque al wall clock.
-Per smoke/headless (utile in CI) usare:
+| Layer | Responsibility | Technology | Input | Output | Authoritative |
+|---|---|---|---|---|---|
+| FFmpeg ingest | Decode fixture audio and pace PCM production | FFmpeg subprocess, `pcm_blocks`, `FFmpegProducer` | Fixture WAV | `PCMBlock` stream, FFmpeg state/error | No |
+| Ring buffer | Bounded FIFO with overwrite accounting | `PCMBlockRing` | `PCMBlock` | Buffered PCM + `RingStats` | No |
+| DSP detector bank | Build features and candidate glitches | NumPy in `DSPProcessor` | `PCMBlock` | `DSPCandidate`, `FeatureWindow`, interim records | Yes |
+| Event builder | Merge, hysteresis, cooldown, priority conflicts | `EventBuilder` inside `glitch_poc.dsp` | `DSPCandidate` + emitted frame | Authoritative `DSPEvent` lifecycle records | Yes |
+| Gemma queue/worker | Local, bounded annotation worker | `GemmaWorker`, `OllamaClient`, `spawn` child process | Closed `detected`/`uncertain` events + evidence | `GemmaAnnotation` or `error` | No |
+| Audit/log | Append-only session log | `SessionAuditLogger` | Session, DSP, Gemma records | JSONL under `logs/` | No |
+
+Note: the current FFmpeg ingest only decodes/resamples. It does not use `astats`, `silencedetect`, or `ebur128` in the runtime.
+
+## DSP Detectors
+
+The raw score is a ratio-like severity value, not a probability.
+
+| Code detector name | `candidate_type` | What it catches | Features and thresholds used in code | Initial status |
+|---|---|---|---|---|
+| `click` | `click` | Impulsive discontinuity | 5 ms window; derivative peak; `click_derivative=0.50`; context RMS must stay at or below `0.22` | `detected` |
+| `flat_top` | `clipping` | Saturated samples / flat top | 10 ms window; `clip_level=0.44`; `clip_ratio=0.08`; evidence uses near-peak ratio and peak level | `detected` |
+| `block_repeat` | `stutter` | Repeated block with similar energy | 20 ms window; autocorrelation around 80 ms lag; `repeat_correlation=0.995`; RMS ratio must stay in `0.80..1.25` | `detected` |
+| `loop` | `loop` | Longer periodic loop | 1000 ms window; autocorrelation at 500 ms and 1000 ms lags; `loop_correlation=0.998` | `uncertain` |
+| `dropout` | `dropout` | Low-RMS section with post-context check | 100 ms window; low-RMS ratio `q <= 0.18`; floor ratio `<= 0.05`; post-context ratio `0.5..2`; CV `<= 0.20`; descent hops `<= 2` | `uncertain` |
+
+When candidates overlap, priority is `clipping > dropout > stutter > loop > click`.
+The builder can supersede lower-priority open events.
+
+## Gemma e4b
+
+Gemma runs locally through Ollama at `http://127.0.0.1:11434/api/generate`.
+The worker is single-concurrency, bounded to 16 queued requests, and uses `spawn`, not `fork`.
+There are no POST retries. Default timeout is 10 s, and shutdown drain is bounded.
+The request payload is minified JSON with `temperature=0`, `num_predict=256`, and `keep_alive=5m`.
+
+| Aspect | Code reality |
+|---|---|
+| Input | Canonical DSP JSON for a closed `detected` or `uncertain` event, plus at most 2 selected evidence windows |
+| Output | `annotation_status` = `coherent`, `insufficient_evidence`, or `error`; `cannot_override_dsp=True` |
+| Failure handling | Invalid JSON, transport failure, timeout, or schema mismatch become `error`; DSP keeps running |
+| Negative control | Raw audio is not a production input; it is only a validation concept and test coverage check |
+
+The allowed evidence features are type-specific: click uses `derivative_peak` and `context_rms`; clipping uses `near_peak_ratio` and `peak_level`; stutter uses `correlation_lag_80ms` and `rms_ratio`; dropout uses `rms`, `baseline_rms`, `rms_ratio`, and `floor_ratio`; loop uses `correlation_lag_500ms` and `correlation_lag_1000ms`.
+
+## How To Run
+
+Requirements: Python 3.12+, FFmpeg on `PATH`, and Ollama only if you want Gemma annotations.
+Install the project with:
+
+```sh
+python3.12 -m pip install -e .
+```
+
+Run the POC with the console script or module entrypoint:
 
 ```sh
 glitch-poc clean --no-ui --duration 1
-python3.12 -m unittest discover -s tests -v
+glitch-poc corrupted --no-ui --duration 10.5
+glitch-poc corrupted --gemma-annotations
 ```
 
-Gli snapshot headless includono record lifecycle append-only (`OPENED`,
-`UPDATED`, `CLOSED`, `CANCELLED`, `SUPERSEDED`) con `event_id` stabile,
-revision, epoch, frame emesso, detector/evidence IDs ordinati e stato. Gli
-alert `OPENED` sono emessi a hop di 10 ms, senza attendere merge/finalizzazione;
-lo score è un rapporto/severità grezzo **non probabilistico**. Il profilo usa
-finestre 5/20 ms (click e flat-top), 100 ms (dropout), 20/100 ms (block repeat),
-500/1000 ms (loop uncertain), merge 50 ms e cooldown 100 ms. La soglia clipping è `abs(float PCM) >= 0.44`
-con almeno l'8% dei campioni: è calibrata esclusivamente sulla fixture
-`clip(6*x, ±0.45)`, non è una soglia PCM16 universale.
-
-Verifica riproducibile (cache/artefatti sotto `.work/`):
+Equivalent module form:
 
 ```sh
-PYTHONPYCACHEPREFIX="$PWD/.work/pycache" .work/venv/bin/python -m unittest discover -s tests -v
-PYTHONPYCACHEPREFIX="$PWD/.work/pycache" .work/venv/bin/python -m tools.dsp_metrics > .work/dsp-metrics.json
+python3.12 -m glitch_poc.cli corrupted --gemma-annotations
 ```
 
-Limiti POC: i detector sono euristiche calibrate solo sul corpus sintetico. Il
-dropout resta `uncertain` senza recovery/post-contesto; non separa
-universalmente silenzio semantico e guasto. Loop è sempre `uncertain` e non
-entra nella recall senza ground truth positivo. Discontinuity, frame/sequence
-gap e overflow cancellano lifecycle aperti, resettano baseline/history/cooldown,
-incrementano l'epoch e producono record auditabili: nessun merge attraversa un
-gap. Il report marca `insufficient_corpus=true`: una fixture da 10 s per classe
-non consente di dichiarare un tasso operativo di falsi allarmi.
+Available CLI arguments:
 
-## Gemma grounded (opt-in)
+| Argument | Meaning |
+|---|---|
+| `fixture` | Required positional value: `clean` or `corrupted` |
+| `--no-ui` | Print JSON snapshots instead of opening the TUI |
+| `--gemma-annotations` | Enable the local Gemma worker |
+| `--gemma-drain-timeout` | Bounded post-EOF drain budget, 43 s with current defaults |
+| `--log-dir` | Project-relative log directory, default `logs` |
+| `--duration` | Stop after N seconds |
 
-Gemma è disabilitata per default. `--gemma-annotations` avvia un worker dedicato a
-concorrenza **1**, con coda bounded (16 richieste), timeout calibrato di 10 s e nessun retry
-POST; una coda piena scarta solo l'annotazione e incrementa la telemetria. L'endpoint
-è esclusivamente HTTP loopback (`127.0.0.1`, `localhost`, `::1`) e il modello è
-`gemma4:e4b`. Non vengono letti `.env`, chiavi o servizi cloud.
-Un executor isolato usa il metodo multiprocessing `spawn` (mai `fork`): viene
-avviato prima della TUI e del thread di annotazione, poi processa le richieste in
-serie. Questo evita di creare processi dopo l'inizializzazione del terminale macOS
-e resta terminabile durante lo shutdown.
+The TUI needs at least a 100x30 terminal.
+It shows four panels: `OBSERVED PCM`, `RUNTIME HEALTH`, `DSP DETECTION`, and `GEMMA DETAIL`/`GEMMA SUMMARY`.
 
-Avvia prima Ollama locale (con `gemma4:e4b` disponibile), poi usa esattamente:
+Keys:
 
-```sh
-.work/venv/bin/python -m glitch_poc.cli corrupted --gemma-annotations
-```
+| Key | Action |
+|---|---|
+| `q` | Cancel pending Gemma work and quit immediately |
+| `d` | Drain Gemma boundedly after EOF, then quit |
+| `[` / `]` | Scroll the Gemma panel |
+| `Ctrl+S` | Toggle Gemma detail vs summary |
 
-Nella TUI attendere la chiusura DSP della fixture (circa 10.5 s), quindi le quattro
-annotazioni seriali richiedono indicativamente altri 25--30 s sul modello calibrato.
-Il riquadro Gemma conserva la testata di stato e rende tutte le annotazioni recenti
-in una cronologia scrollabile con wrap di spiegazioni, errori ed evidence. Usare la
-rotella del mouse (o il focus nativo del pannello) oppure `[` e `]` per scorrere;
-`Ctrl+S` alterna `GEMMA DETAIL`, la lista completa scrollabile con evidenze e
-spiegazioni/errori, e `GEMMA SUMMARY`, la tabella degli eventi DSP `CLOSED`
-correlati alle annotazioni Gemma, inclusi gli eventi disabled, pending o error. Il
-Footer riporta gli stessi comandi. `q` esce subito e cancella il lavoro pendente con
-outcome auditabile; `D` esegue invece drain bounded e poi esce.
+In headless mode, the app prints one JSON snapshot roughly 12 times per second.
+The snapshot contains `position_frames`, `rms`, `peak`, `ffmpeg`, `buffer_fill`, `events`, `evidence`, `dsp_audit`, `gemma_annotations`, `gemma_queue`, and `audit_log`.
 
-Il worker riceve soltanto record DSP consolidati `CLOSED` con stato `detected` o
-`uncertain`, deduplicati per `(event_id, revision, lifecycle)`: non annota `OPENED`,
-`UPDATED`, `clean`, `CANCELLED` o `SUPERSEDED`. Nella fixture `corrupted`, dopo la
-chiusura dei lifecycle (a 10.5 s tutti i candidati dovrebbero essere chiusi), click,
-dropout, stutter e clipping sono candidati all'annotazione. L'annotazione è una
-valutazione descrittiva di coerenza e non verifica né modifica autoritativamente il
-verdetto DSP.
+## JSONL Audit
 
-In headless, soltanto dopo EOF naturale il runtime drena le annotazioni già accettate
-per un massimo di 43 s (`--gemma-drain-timeout 43`): una risposta, timeout o errore è
-registrato per ciascun candidato. Alla scadenza il log contiene un errore esplicito
-`shutdown_drain_timeout` per ogni richiesta residua. Uscita TUI con `q`, Ctrl-C,
-durata interrotta e failure FFmpeg usano invece cancellazione immediata bounded; gli
-outcome cancellati restano auditabili. La TUI non avvia il drain automaticamente a
-EOF: lo esegue soltanto alla sua chiusura, così resta reattiva.
-La calibrazione offline riproducibile è `python tools/calibrate_gemma_timeout.py`:
-esegue localmente il DSP sulla fixture solo per ricavare i quattro eventi finali reali,
-ma invia a Ollama esclusivamente i loro payload JSON whitelist compatti (mai audio o
-PCM). Registra cold e warm per click, clipping, dropout e stutter in
-`.work/gemma-timeout-calibration.json`. La proposta usa max con meno di 20 campioni
-(altrimenti p95), margine 1.5, arrotondamento al secondo e clamp 5--60 s; il runtime è
-aggiornato solo se tutte le quattro classi producono output grounded valido. Schema
-prompt v2 limita a due evidence recenti e alle feature pertinenti per tipo; imposta
-`temperature=0`, `num_predict=256`, JSON minificato ed explanation <=400 caratteri.
-L'ultima prova v2 ha misurato 4.307--6.431 s su 8 risposte valide: timeout 10 s e
-drain seriale 43 s.
-L'input è JSON strutturato con evento canonico, profilo, feature/evidence ID e contesto
-descrittivo limitato; non contiene PCM, audio, waveform, spettrogrammi, base64, path o
-URI. Timeout, modello indisponibile e JSON invalido producono una `GemmaAnnotation`
-separata con stato `error`, senza fermare DSP, logging o TUI.
+Logs are written to `logs/session-YYYYMMDD-HHMMSS[-N].jsonl` by `SessionAuditLogger`.
+The schema version is `session-audit-v1`.
 
-Esempio inventato di risposta valida:
+| Record type | Main fields |
+|---|---|
+| `session_started` | `session_id`, `timestamp`, `fixture`, `stream_id`, `profile_id`, `app`, `gemma` |
+| `dsp_event` | `event_id`, `revision`, `lifecycle`, `status`, `glitch_type`, `start_frame`, `end_frame`, `emitted_frame`, `raw_score`, `detector_ids`, `evidence_ids`, `epoch_id`, `profile_id` |
+| `gemma_annotation` | `event_id`, `revision`, `annotation_status`, `glitch_type_annotation`, `confidence`, `supporting_evidence_ids`, `explanation`, `error`, `cannot_override_dsp`, `model`, `model_metadata`, `prompt_schema_version`, `timeout_s` |
+| `session_ended` | `reason`, `summary` |
 
-```json
-{"event_id":"poc-d2-v2:e0:00001","annotation_status":"coherent","glitch_type_annotation":"loop","confidence":"medium","supporting_evidence_ids":["poc-d2-v2:e0:loop:48000:48480"],"explanation":"Le correlazioni fornite supportano il loop.","cannot_override_dsp":true}
-```
+The audit log intentionally excludes audio, PCM, waveform, spectrogram, prompt bodies, secrets, paths, and URIs.
 
-La TUI conserva il layout 2x2 per terminali 100x30: il pannello Gemma visualizza
-coda/worker, `DSP verdict` e `Gemma annotation` per tutti gli eventi finali. Se Ollama
-o il modello non è disponibile, l'annotazione registra `error`; DSP, TUI e logging
-continuano senza degradare il verdetto.
+## Known Limits
 
-## Audit di sessione
+Validation currently covers the synthetic fixture pair and the current `poc-d2-v2` thresholds.
+The detector bank is deterministic, but its thresholds are tuned to this corpus and not proven on real-world material.
+The current UI shows observed PCM only; it does not display a side-by-side source/reference waveform.
+Codec-artifact detection is not a dedicated runtime detector yet.
 
-Ogni avvio TUI o headless crea un JSONL append-only in `logs/`, ad esempio
-`logs/session-20260906-123456.jsonl` (un suffisso evita collisioni). È possibile
-scegliere una directory relativa e contenuta nel progetto: `--log-dir logs/demo`.
-Il primo/ultimo record sono `session_started`/`session_ended`; ogni lifecycle DSP è
-un record `dsp_event` e ogni risposta Gemma un record `gemma_annotation`, collegati
-da `session_id`, `event_id` e `correlation_id`. Il log non contiene audio, PCM,
-waveform, path audio, segreti o prompt integrali. Un errore del writer è mostrato in
-Runtime Health e non blocca DSP o TUI.
+`tools/reference_diff_detector.py` is an offline calibration helper only. It compares clean vs corrupted files and is not part of the runtime path.
 
-Le fixture canoniche sono in `fixtures/audio/`; per rigenerarle:
+## Deviations From The Original Design
 
-```sh
-python3 tools/generate_audio_fixtures.py
-```
+| Design expectation | Code reality |
+|---|---|
+| FFmpeg telemetry filters (`astats`, `silencedetect`, `ebur128`) | Not implemented in runtime; FFmpeg is used only as a persistent decoder/resampler |
+| Source vs observed TUI | Not implemented; the current UI shows observed PCM, runtime health, DSP, and Gemma panes |
+| Optional spectrogram input to Gemma | Not implemented; Gemma receives structured DSP facts only |
+| Dedicated codec-artifact detector | Not implemented; only click, clipping, dropout, stutter, and loop are present |
+| Uppercase `D` quit binding | The code binds lower-case `d` for bounded drain and quit |
+| Model digest / rich model metadata in logs | Session logs keep model name and timestamp metadata, not a digest contract |
+| User-facing raw-audio negative-control mode | Not present; raw audio is only excluded by tests and validation helpers |
+
+If you need the implementation-level truth, treat the code and tests as authoritative.
