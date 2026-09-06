@@ -17,6 +17,7 @@ from rich.text import Text
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from glitch_poc.cli import resolve_source
 from glitch_poc.contracts import DSPEvent, GemmaAnnotation, PCMBlock
 from glitch_poc.ingest import FFmpegProducer, ffmpeg_command, pcm_blocks
 from glitch_poc.ollama import (
@@ -168,6 +169,24 @@ class IntegrationBoundaryTests(unittest.TestCase):
         self.assertEqual((decoded.sample_rate_hz, decoded.channels, decoded.frame_count), (48_000, 2, 64))
         self.assertEqual(decoded.samples.dtype, np.float32)
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not installed")
+    def test_ffmpeg_decodes_rock_alias_and_external_path_with_spaces(self) -> None:
+        rock = resolve_source(ROOT, "rock-corrupted")
+        external_dir = ROOT / ".work" / "ffmpeg external audio"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        external = external_dir / "song with spaces.wav"
+        external.write_bytes((ROOT / "fixtures" / "audio" / "poc_clean.wav").read_bytes())
+        try:
+            for source in (rock, resolve_source(ROOT, str(external))):
+                process = subprocess.run(ffmpeg_command(str(source.path), realtime=False), capture_output=True,
+                                         check=True, timeout=20)
+                decoded = next(pcm_blocks(io.BytesIO(process.stdout), stream_id=source.stream_id, block_frames=64))
+                self.assertEqual(decoded.frame_count, 64)
+                self.assertNotIn("song with spaces", decoded.stream_id)
+        finally:
+            external.unlink()
+            external_dir.rmdir()
+
     def test_ollama_payload_has_no_raw_audio(self) -> None:
         from glitch_poc.contracts import DSPEvent
         event = DSPEvent("event-1", 1, "CLOSED", "uncertain", "loop", 0, 10, 10, 1.0,
@@ -192,12 +211,13 @@ class IntegrationBoundaryTests(unittest.TestCase):
 class TuiLayoutTests(unittest.IsolatedAsyncioTestCase):
     async def test_layout_is_2x2_at_100x30_and_has_small_terminal_fallback(self) -> None:
         producer = type("Producer", (), {"state": "idle", "error": None})()
-        runtime = SliceRuntime(PCMBlockRing(2, 4), producer)
+        runtime = SliceRuntime(PCMBlockRing(2, 4), producer, source_label="external file a1b2c3d4e5f6")
         app = GlitchTui(runtime)
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             self.assertFalse(app.query_one("#too-small").display)
             self.assertTrue(app.query_one("#panels").display)
+            self.assertIn("external file a1b2c3d4e5f6", str(app.query_one("#source").content))
         compact = GlitchTui(runtime)
         async with compact.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
@@ -311,9 +331,10 @@ class TuiLayoutTests(unittest.IsolatedAsyncioTestCase):
         runtime = SliceRuntime(PCMBlockRing(2, 4), type("Producer", (), {"state": "idle", "error": None})())
         runtime.gemma_worker = object()  # type: ignore[assignment]
         app = GlitchTui(runtime)
-        with patch.object(app, "_drain_then_exit") as drain:
+        with patch.object(runtime, "gemma_drain_budget", return_value=73.0), patch.object(app, "_drain_then_exit") as drain:
             app.action_drain_and_quit()
         self.assertTrue(app._draining)
+        self.assertEqual(app._drain_budget_s, 73.0)
         drain.assert_called_once()
         self.assertIn(("q", "cancel_and_quit", "Cancel pending"), app.BINDINGS)
         self.assertIn(("d", "drain_and_quit", "Drain Gemma + quit"), app.BINDINGS)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping
 
+DRAIN_OVERHEAD_S = 3
 
 def proposed_timeout_seconds(valid_elapsed_seconds: Iterable[float], *, minimum_s: int = 5,
                              maximum_s: int = 60, safety_factor: float = 1.5) -> int | None:
@@ -18,10 +19,10 @@ def proposed_timeout_seconds(valid_elapsed_seconds: Iterable[float], *, minimum_
     return max(minimum_s, min(maximum_s, math.ceil(percentile * safety_factor)))
 
 
-def default_drain_timeout_seconds(annotation_timeout_s: float, *, fixture_requests: int = 4,
-                                  overhead_s: int = 3) -> float:
-    """Serial fixture drain budget: four requests plus bounded process/queue overhead."""
-    return max(15.0, fixture_requests * annotation_timeout_s + overhead_s)
+def default_drain_timeout_seconds(annotation_timeout_s: float, *, pending_requests: int,
+                                   overhead_s: int = DRAIN_OVERHEAD_S) -> float:
+    """Serial graceful-drain budget for accepted in-flight and queued work only."""
+    return pending_requests * annotation_timeout_s + (overhead_s if pending_requests else 0.0)
 
 
 def proposal_for_four_classes(samples: Iterable[Mapping[str, object]], expected_types: frozenset[str]) -> int | None:

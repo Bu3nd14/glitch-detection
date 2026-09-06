@@ -35,12 +35,13 @@ class GlitchTui(App[None]):
                              ("]", "scroll_gemma_down", "Gemma down"),
                              ("ctrl+s", "toggle_gemma_summary", "Summary / detail")]
 
-    def __init__(self, runtime: SliceRuntime, *, gemma_drain_timeout_s: float = 43.0) -> None:
+    def __init__(self, runtime: SliceRuntime, *, gemma_drain_timeout_s: float | None = None) -> None:
         super().__init__()
         self.runtime = runtime
         self.gemma_drain_timeout_s = gemma_drain_timeout_s
         self._draining = False
         self._show_gemma_summary = False
+        self._drain_budget_s: float | None = None
         self._refresh_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
@@ -73,6 +74,7 @@ class GlitchTui(App[None]):
         if self._draining or self.runtime.gemma_worker is None:
             return
         self._draining = True
+        self._drain_budget_s = self.runtime.gemma_drain_budget(self.gemma_drain_timeout_s)
         self._drain_then_exit()
 
     def action_scroll_gemma_up(self) -> None:
@@ -104,7 +106,7 @@ class GlitchTui(App[None]):
         snap = self.runtime.snapshot()
         seconds = snap.position_frames / 48_000
         self.query_one("#source", Static).update(
-            f"OBSERVED PCM\n{wave(snap.waveform)}\n"
+            f"OBSERVED PCM — {getattr(self.runtime, 'source_label', 'source unavailable')}\n{wave(snap.waveform)}\n"
             f"position {seconds:6.2f}s  RMS {snap.rms:.3f}  peak {snap.peak:.3f}")
         self.query_one("#health", Static).update(
             f"RUNTIME HEALTH\nFFmpeg: {snap.ffmpeg_state} {snap.ffmpeg_error or ''}\n"
@@ -122,20 +124,21 @@ class GlitchTui(App[None]):
         gemma_detail = self.query_one("#gemma-detail", Static)
         gemma_detail.set_class(self._show_gemma_summary, "summary")
         self.query_one("#gemma-status", Static).update(
-            Text(self._gemma_status(snap, summary=self._show_gemma_summary)))
+            Text(self._gemma_status(snap, summary=self._show_gemma_summary, drain_budget_s=self._drain_budget_s)))
         if self._show_gemma_summary:
             gemma_detail.update(Text(self._gemma_summary(snap), overflow="crop", no_wrap=True))
         else:
             gemma_detail.update(Text(self._gemma_detail(snap, latest), overflow="fold", no_wrap=False))
 
     @staticmethod
-    def _gemma_status(snap: RuntimeSnapshot, *, summary: bool = False) -> str:
+    def _gemma_status(snap: RuntimeSnapshot, *, summary: bool = False, drain_budget_s: float | None = None) -> str:
         mode = "SUMMARY" if summary else "DETAIL"
         if snap.gemma_queue is None:
             return (f"GEMMA {mode} — disabled\nEnable with --gemma-annotations.\n"
                     "[/] scroll · mouse wheel · Ctrl+S Summary/Detail")
         queue = snap.gemma_queue
-        return (f"GEMMA {mode} {queue.worker_state}  completed {queue.completed}/{queue.submitted}\n"
+        drain = "" if drain_budget_s is None else f"  drain {drain_budget_s:.1f}s"
+        return (f"GEMMA {mode} {queue.worker_state}  completed {queue.completed}/{queue.submitted}{drain}\n"
                 f"queue {queue.queued}  pending {queue.pending}  dropped {queue.dropped_backpressure}\n"
                 "[/] scroll · mouse wheel · Ctrl+S Summary/Detail")
 

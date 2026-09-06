@@ -40,8 +40,8 @@ def validate_log_dir(root: Path, value: str) -> Path:
 class SessionAuditLogger:
     """Bounded producer queue and one writer thread; producers only use put_nowait."""
     def __init__(self, root: Path, log_dir: str, *, fixture: str, stream_id: str, profile_id: str,
-                 gemma_enabled: bool, clock: Callable[[], datetime] = lambda: datetime.now().astimezone(),
-                 capacity: int = 512) -> None:
+                  gemma_enabled: bool, clock: Callable[[], datetime] = lambda: datetime.now().astimezone(),
+                  capacity: int = 512, source_kind: str = "fixture", source_fingerprint: str | None = None) -> None:
         self._lock = threading.Lock()
         self._queue: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=capacity)
         self._closed = False
@@ -72,7 +72,8 @@ class SessionAuditLogger:
             self._thread.start()
             self._submit({"record_type": "session_started", "schema_version": AUDIT_SCHEMA_VERSION,
                 "session_id": self.session_id, "timestamp": moment.isoformat(), "fixture": fixture,
-                "stream_id": stream_id, "profile_id": profile_id,
+                "stream_id": stream_id, "source_kind": source_kind, "source_fingerprint": source_fingerprint,
+                "profile_id": profile_id,
                 "app": {"name": "glitch-detection-poc", "version": "0.1.0"},
                 "gemma": {"enabled": gemma_enabled, "model": "gemma4:e4b", "local_loopback_only": True}})
         except (OSError, ValueError) as error:

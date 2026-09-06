@@ -1,7 +1,9 @@
 """Lifecycle-aware, reproducible fixture metrics for ``poc-d2-v2``."""
 from __future__ import annotations
 
+import io
 import json
+import subprocess
 import wave
 from collections import defaultdict
 from pathlib import Path
@@ -10,6 +12,7 @@ import numpy as np
 
 from glitch_poc.contracts import DSPEvent, PCMBlock
 from glitch_poc.dsp import DSPProcessor
+from glitch_poc.ingest import ffmpeg_command, pcm_blocks
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "fixtures" / "audio"
@@ -28,6 +31,16 @@ def blocks(path: Path, block_frames: int = BLOCK_FRAMES) -> list[PCMBlock]:
 def analyze(path: Path) -> list[DSPEvent]:
     processor, records = DSPProcessor(), []
     for block in blocks(path):
+        records.extend(processor.process(block))
+    records.extend(processor.finish())
+    return records
+
+
+def analyze_ffmpeg(path: Path, block_frames: int = BLOCK_FRAMES) -> list[DSPEvent]:
+    """Use the production FFmpeg 44.1 kHz -> 48 kHz path for non-runtime-rate fixtures."""
+    process = subprocess.run(ffmpeg_command(str(path), realtime=False), capture_output=True, check=True, timeout=30)
+    processor, records = DSPProcessor(), []
+    for block in pcm_blocks(io.BytesIO(process.stdout), stream_id="fixture", block_frames=block_frames):
         records.extend(processor.process(block))
     records.extend(processor.finish())
     return records
@@ -102,14 +115,22 @@ def guarded_exposure(frame_count: int, truth: list[tuple[str, int, int]]) -> int
     return frame_count - covered
 
 
-def main() -> None:
-    manifest = json.loads((ASSETS / "poc_ground_truth.json").read_text())
-    truth = [(fault["class"], fault["interval"]["start"], fault["interval"]["end"])
-             for fault in manifest["faults"]]
-    corrupted_records, clean_records = analyze(ASSETS / "poc_corrupted.wav"), analyze(ASSETS / "poc_clean.wav")
+def fixture_report(manifest_name: str) -> dict[str, object]:
+    manifest = json.loads((ASSETS / manifest_name).read_text())
+    faults = manifest["faults"]
+    def runtime_truth(item: dict[str, object]) -> tuple[str, int, int]:
+        interval = item.get("runtime_interval", item["interval"])
+        return item["class"], interval["start"], interval["end"]
+    truth = [runtime_truth(fault) for fault in faults]
+    analyzer = analyze_ffmpeg if manifest["format"]["sample_rate_hz"] != SAMPLE_RATE else analyze
+    corrupted_records = analyzer(ASSETS / manifest["files"]["corrupted"]["path"])
+    clean_records = analyzer(ASSETS / manifest["files"]["clean"]["path"])
     observed = canonicalize(corrupted_records)
     detected = [event for event in observed if event.status == "detected"]
     uncertain = [event for event in observed if event.status == "uncertain"]
+    clean_observed = canonicalize(clean_records)
+    clean_detected = [event for event in clean_observed if event.status == "detected"]
+    clean_uncertain = [event for event in clean_observed if event.status == "uncertain"]
     unmatched = list(detected)
     matched: list[tuple[str, int, int]] = []
     for item in truth:
@@ -118,25 +139,83 @@ def main() -> None:
             unmatched.remove(hit)
             matched.append(item)
     fn = [item for item in truth if item not in matched]
-    clean_seconds = manifest["format"]["frames"] / SAMPLE_RATE
-    unannotated_seconds = guarded_exposure(manifest["format"]["frames"], truth) / SAMPLE_RATE
+    expected_uncertain_truth = [runtime_truth(fault) for fault in faults if fault.get("expected_status") == "uncertain"]
+    expected_uncertain_controls = [
+        ("dropout", *(control.get("runtime_interval", control.get("interval"))))
+        for control in manifest.get("clean_controls", []) + manifest.get("controls", [])
+        if control.get("expected_status") == "uncertain"
+    ]
+
+    def expected_uncertain(event: DSPEvent, expected: list[tuple[str, int, int]]) -> bool:
+        return any(matches(event, item) for item in expected)
+
+    corrupted_fault_uncertain = [event for event in uncertain if expected_uncertain(event, expected_uncertain_truth)]
+    corrupted_control_uncertain = [event for event in uncertain if expected_uncertain(event, expected_uncertain_controls)]
+    corrupted_expected_uncertain = list({event.event_id: event for event in corrupted_fault_uncertain + corrupted_control_uncertain}.values())
+    clean_expected_uncertain = [event for event in clean_uncertain if expected_uncertain(event, expected_uncertain_controls)]
+    corrupted_unexpected_uncertain = [event for event in uncertain if event not in corrupted_expected_uncertain]
+    clean_unexpected_uncertain = [event for event in clean_uncertain if event not in clean_expected_uncertain]
+    baseline = [(item["class"], *item["runtime_interval"]) for item in manifest.get("baseline_events", [])]
+    is_baseline = lambda item: any(matches(item, value) for value in baseline)
+    corrupted_unexpected_uncertain = [item for item in corrupted_unexpected_uncertain if not is_baseline(item)]
+    clean_unexpected_uncertain = [item for item in clean_unexpected_uncertain if not is_baseline(item)]
+    scored_detected = [item for item in detected if not is_baseline(item)]
+    scored_unmatched = [item for item in unmatched if not is_baseline(item)]
+    scored_clean_detected = [item for item in clean_detected if not is_baseline(item)]
+    runtime_frames = round(manifest["format"]["frames"] * SAMPLE_RATE / manifest["format"]["sample_rate_hz"])
+    clean_seconds = runtime_frames / SAMPLE_RATE
+    unannotated_seconds = guarded_exposure(runtime_frames, truth) / SAMPLE_RATE
     exposure_seconds = clean_seconds + unannotated_seconds
-    false_alarms = len(unmatched) + len(canonicalize(clean_records))
-    report = {
+    false_alarms = len(scored_unmatched) + len(scored_clean_detected)
+    return {
         "profile_id": "poc-d2-v2", "sample_count": {"clean": len(clean_records), "corrupted": len(corrupted_records),
         "canonical_detected": len(detected), "canonical_uncertain": len(uncertain)},
-        "matching": {"tp": len(matched), "fp": len(unmatched), "fn": len(fn),
-                     "uncertain": len(uncertain), "precision": len(matched) / len(detected) if detected else 1.0,
-                     "recall": len(matched) / len(truth)},
+        "detected": {"tp": len(matched), "fp": false_alarms, "fn": len(fn),
+                     "precision": len(matched) / len(scored_detected) if scored_detected else 1.0,
+                     "recall": len(matched) / len(truth), "recall_denominator_faults": len(truth)},
+        "uncertain_expected": {"faults": len(corrupted_fault_uncertain), "corrupted_controls": len(corrupted_control_uncertain),
+                               "clean_controls": len(clean_expected_uncertain),
+                               "total": len(corrupted_expected_uncertain) + len(clean_expected_uncertain)},
+        "uncertain_unexpected": {"corrupted": len(corrupted_unexpected_uncertain), "clean": len(clean_unexpected_uncertain),
+                                 "total": len(corrupted_unexpected_uncertain) + len(clean_unexpected_uncertain)},
         "latency_ms": latency(corrupted_records, truth),
         "latency_by_class_ms": {item[0]: latency(corrupted_records, [item]) for item in truth},
         "false_alarm": {"count": false_alarms, "exposure_seconds": exposure_seconds,
-                        "per_hour": false_alarms / exposure_seconds * 3600 if exposure_seconds else None,
-                        "insufficient_corpus": True},
+                         "per_hour": false_alarms / exposure_seconds * 3600 if exposure_seconds else None,
+                         "insufficient_corpus": True},
+        "naive_detected_false_alarm": {"count": len(unmatched) + len(clean_detected),
+                                        "declared_baseline_excluded": (len(unmatched) - len(scored_unmatched)
+                                                                       + len(clean_detected) - len(scored_clean_detected))},
         "canonical_events": [event.to_dict() for event in observed],
-        "uncertain_events": [event.to_dict() for event in uncertain],
+        "uncertain_events": [event.to_dict() for event in uncertain + clean_uncertain],
     }
-    print(json.dumps(report, indent=2, sort_keys=True))
+
+
+def main() -> None:
+    fixtures = {
+        "v1": fixture_report("poc_ground_truth.json"),
+        "rock_v1": fixture_report("poc_rock_v1_ground_truth.json"),
+        "harvard_v1": fixture_report("poc_harvard_v1_ground_truth.json"),
+    }
+    total_truth = sum(len(json.loads((ASSETS / name).read_text())["faults"])
+                       for name in ("poc_ground_truth.json", "poc_rock_v1_ground_truth.json", "poc_harvard_v1_ground_truth.json"))
+    aggregate_detected = {key: sum(report["detected"][key] for report in fixtures.values()) for key in ("tp", "fp", "fn")}
+    aggregate_uncertain = {
+        "expected": sum(report["uncertain_expected"]["total"] for report in fixtures.values()),
+        "unexpected": sum(report["uncertain_unexpected"]["total"] for report in fixtures.values()),
+    }
+    print(json.dumps({
+        "profile_id": "poc-d2-v2",
+        "fixtures": fixtures,
+        "aggregate": {
+            "fixture_count": len(fixtures),
+            "fault_count": total_truth,
+            "detected": aggregate_detected,
+            "uncertain": aggregate_uncertain,
+            "insufficient_corpus": True,
+            "limitation": "Two deterministic synthetic fixtures cannot estimate operational rates.",
+        },
+    }, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

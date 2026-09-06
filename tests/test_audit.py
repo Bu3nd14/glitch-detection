@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -95,6 +96,48 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(records[-1]["record_type"], "session_ended")
         self.assertFalse(records[0]["gemma"]["enabled"])
         self.assertNotIn("path", json.dumps(records).lower())
+
+    def test_cli_external_file_uses_private_source_identity_in_audit(self) -> None:
+        directory = f".work/audit-external-{os.getpid()}"
+        external_dir = ROOT / ".work" / f"external audio {os.getpid()}"
+        external_dir.mkdir(parents=True, exist_ok=True)
+        external = external_dir / "private song.wav"
+        shutil.copyfile(ROOT / "fixtures" / "audio" / "poc_clean.wav", external)
+        class Producer:
+            state = "eof"
+            error = None
+            def __init__(self, *args: object, **kwargs: object) -> None: pass
+            def start(self) -> bool: return True
+            def stop(self) -> None: pass
+        try:
+            spec = cli.resolve_source(ROOT, str(external))
+            self.assertEqual(spec.kind, "external_file")
+            self.assertNotIn(external.name, spec.stream_id)
+            with patch("glitch_poc.cli.FFmpegProducer", Producer):
+                self.assertEqual(cli.main([str(external), "--no-ui", "--log-dir", directory]), 0)
+            records = [json.loads(line) for line in max((ROOT / directory).glob("session-*.jsonl")).read_text().splitlines()]
+            started = records[0]
+            self.assertEqual(started["source_kind"], "external_file")
+            self.assertEqual(started["source_fingerprint"], spec.fingerprint)
+            self.assertEqual(started["stream_id"], spec.stream_id)
+            rendered = json.dumps(records)
+            self.assertNotIn(str(external), rendered)
+            self.assertNotIn(external.name, rendered)
+            self.assertNotIn("path", rendered.lower())
+        finally:
+            external.unlink()
+            external_dir.rmdir()
+
+    def test_cli_source_validation_rejects_missing_directory_and_unreadable(self) -> None:
+        self.assertEqual(cli.resolve_source(ROOT, "rock-corrupted").path.name, "poc_rock_v1_corrupted.wav")
+        self.assertEqual(cli.resolve_source(ROOT, "harvard-corrupted").path.name, "poc_harvard_v1_corrupted.wav")
+        with self.assertRaisesRegex(ValueError, "does not exist"):
+            cli.resolve_source(ROOT, str(ROOT / ".work" / "missing-audio.wav"))
+        with self.assertRaisesRegex(ValueError, "regular file"):
+            cli.resolve_source(ROOT, str(ROOT / ".work"))
+        readable = ROOT / "fixtures" / "audio" / "poc_clean.wav"
+        with patch.object(Path, "open", side_effect=PermissionError), self.assertRaisesRegex(ValueError, "not readable"):
+            cli.resolve_source(ROOT, str(readable))
 
     def test_session_end_keeps_gemma_outcome_summary(self) -> None:
         logger = SessionAuditLogger(ROOT, f".work/audit-summary-{os.getpid()}", fixture="corrupted",

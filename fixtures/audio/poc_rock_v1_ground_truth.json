@@ -1,0 +1,153 @@
+{
+  "clean_controls": [
+    {
+      "interval": [
+        168000,
+        191040
+      ],
+      "name": "drum_fill"
+    },
+    {
+      "interval": [
+        288000,
+        303360
+      ],
+      "name": "stop_fade"
+    },
+    {
+      "interval": [
+        336000,
+        384000
+      ],
+      "name": "tremolo"
+    },
+    {
+      "interval": [
+        643200,
+        681600
+      ],
+      "name": "soft_limiter"
+    },
+    {
+      "expected_status": "uncertain",
+      "interval": [
+        700800,
+        711360
+      ],
+      "name": "hard_mute",
+      "rationale": "Intentional no-reference ambiguity control; it is not an operational false alarm."
+    }
+  ],
+  "clean_invariants": {
+    "correlation_lag_500ms_left": -0.1050581772646695,
+    "detected_target_events_expected": 0,
+    "max_derivative_float": 0.14847254860072634,
+    "peak_s16": 9175
+  },
+  "faults": [
+    {
+      "class": "click",
+      "formula": "0.62*exp(-k/9)*cos(pi*k)",
+      "interval": {
+        "end": 111264,
+        "semantics": "half-open",
+        "start": 111216,
+        "unit": "frames"
+      },
+      "replacement": "both channels",
+      "seconds": {
+        "end": 2.318,
+        "start": 2.317
+      }
+    },
+    {
+      "allowed_statuses": [
+        "uncertain"
+      ],
+      "class": "dropout",
+      "expected_status": "uncertain",
+      "fade_in_frames": 240,
+      "fade_out_frames": 240,
+      "interval": {
+        "end": 267360,
+        "semantics": "half-open",
+        "start": 255840,
+        "unit": "frames"
+      },
+      "rationale": "No-reference RMS recovery is intentionally ambiguous in this musical context.",
+      "seconds": {
+        "end": 5.57,
+        "start": 5.33
+      },
+      "zero_interval": {
+        "end": 267120,
+        "start": 256080
+      }
+    },
+    {
+      "class": "stutter",
+      "interval": {
+        "end": 460800,
+        "semantics": "half-open",
+        "start": 437760,
+        "unit": "frames"
+      },
+      "repetitions": 6,
+      "seconds": {
+        "end": 9.6,
+        "start": 9.12
+      },
+      "source_interval": {
+        "end": 433920,
+        "start": 430080
+      }
+    },
+    {
+      "class": "clipping",
+      "interval": {
+        "end": 610560,
+        "semantics": "half-open",
+        "start": 584640,
+        "unit": "frames"
+      },
+      "plateau": 0.46,
+      "ramp_frames": 960,
+      "seconds": {
+        "end": 12.72,
+        "start": 12.18
+      },
+      "transform": "ramp(20ms, clip(8*x_clean, -0.46, +0.46))"
+    }
+  ],
+  "files": {
+    "clean": {
+      "path": "poc_rock_v1_clean.wav",
+      "sha256": "d4a590e25065817959b33024e5d35055c0e84311d746b564a4cea23724c97f43"
+    },
+    "corrupted": {
+      "path": "poc_rock_v1_corrupted.wav",
+      "sha256": "c94d7a90c241d54b2e0beb620a5b99090d8473d848348b016fd73331475fed5e"
+    }
+  },
+  "format": {
+    "channels": 2,
+    "codec": "PCM s16le",
+    "container": "WAV",
+    "duration_seconds": 16.0,
+    "frames": 768000,
+    "sample_rate_hz": 48000
+  },
+  "generator": {
+    "name": "poc-rock-v1",
+    "prng": "xorshift32",
+    "quantization": "single float64-to-s16le rounding",
+    "seed": 1380926283
+  },
+  "identifiability_limits": [
+    "One synthetic song cannot estimate operational false-alarm rates.",
+    "The corrupted dropout is profile-dependent and not reliably identifiable as detected.",
+    "The hard mute control intentionally produces an uncertain dropout."
+  ],
+  "profile_id": "poc-d2-v2",
+  "schema_version": 2
+}

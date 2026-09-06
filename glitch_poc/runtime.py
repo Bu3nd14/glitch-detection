@@ -9,6 +9,7 @@ from time import monotonic, sleep
 import numpy as np
 
 from .audit import AuditStats, SessionAuditLogger
+from .calibration import DRAIN_OVERHEAD_S, default_drain_timeout_seconds
 from .contracts import DSPEvent, GemmaAnnotation, PCMBlock
 from .dsp import DSPProcessor
 from .ollama import GemmaQueueStats, GemmaWorker
@@ -59,8 +60,10 @@ class RuntimeSnapshot:
 class SliceRuntime:
     """Paced PCM consumer with authoritative no-reference DSP in this worker thread."""
     def __init__(self, ring: PCMBlockRing, producer: object, *, waveform_points: int = 64,
-                  pacer: WallClockPacer | None = None, gemma_worker: GemmaWorker | None = None) -> None:
+                 pacer: WallClockPacer | None = None, gemma_worker: GemmaWorker | None = None,
+                 source_label: str = "source unavailable") -> None:
         self.ring, self.producer, self.waveform_points = ring, producer, waveform_points
+        self.source_label = source_label
         self._stop = Event()
         self.pacer = pacer or WallClockPacer(48_000, stop_event=self._stop)
         self.pacer.set_stop_event(self._stop)
@@ -74,12 +77,13 @@ class SliceRuntime:
         self.audit_log: SessionAuditLogger | None = None
         self._snapshot_lock = Lock()
         self._consumer_thread: Thread | None = None
+        self.last_gemma_drain: dict[str, object] | None = None
 
     def start(self) -> None:
         if self._consumer_thread is not None and self._consumer_thread.is_alive():
             return
         self._stop.clear()
-        if self.gemma_worker is not None:
+        if self.gemma_worker is not None and self.gemma_worker.stats().worker_state != "stopped":
             self.gemma_worker.start()
         self._consumer_thread = Thread(target=self._consume, name="paced-pcm-consumer", daemon=True)
         self._consumer_thread.start()
@@ -89,7 +93,7 @@ class SliceRuntime:
             if not self.step():
                 self._stop.wait(0.005)
 
-    def stop(self, *, graceful_gemma_drain: bool = False, gemma_drain_timeout_s: float = 15.0) -> None:
+    def stop(self, *, graceful_gemma_drain: bool = False, gemma_drain_timeout_s: float | None = None) -> None:
         self._stop.set()
         if self._consumer_thread is not None:
             self._consumer_thread.join(timeout=0.2)
@@ -100,9 +104,41 @@ class SliceRuntime:
         self._audit_events(records)
         if self.gemma_worker is not None:
             if graceful_gemma_drain:
-                self.gemma_worker.drain_and_stop(gemma_drain_timeout_s)
+                stats = self.gemma_worker.stats()
+                per_request_timeout = self.gemma_worker.client.config.timeout_s
+                overhead = DRAIN_OVERHEAD_S if stats.pending else 0.0
+                effective = gemma_drain_timeout_s if gemma_drain_timeout_s is not None else default_drain_timeout_seconds(
+                    per_request_timeout, pending_requests=stats.pending, overhead_s=overhead)
+                drained = self.gemma_worker.drain_and_stop(effective)
+                final = self.gemma_worker.stats()
+                self.last_gemma_drain = {"requested_budget_s": gemma_drain_timeout_s,
+                                         "override_budget_s": gemma_drain_timeout_s,
+                                         "per_request_timeout_s": per_request_timeout, "overhead_s": overhead,
+                                         "effective_budget_s": effective, "accepted_pending_initial": stats.pending,
+                                         "accepted_pending_final": final.pending, "pending_at_start": stats.pending,
+                                         "submitted": final.submitted,
+                                         "completed": final.completed, "errors": final.errors,
+                                         "cancelled_pending": final.cancelled_pending, "pending": final.pending,
+                                         "drained": drained, "reason": "shutdown_complete" if drained else "shutdown_drain_timeout"}
             else:
                 self.gemma_worker.stop()
+                final = self.gemma_worker.stats()
+                self.last_gemma_drain = {"requested_budget_s": None, "override_budget_s": None,
+                                         "per_request_timeout_s": self.gemma_worker.client.config.timeout_s, "overhead_s": 0.0,
+                                         "effective_budget_s": 0.0, "accepted_pending_initial": final.pending,
+                                         "accepted_pending_final": final.pending,
+                                         "pending_at_start": final.pending, "submitted": final.submitted,
+                                         "completed": final.completed, "errors": final.errors,
+                                         "cancelled_pending": final.cancelled_pending, "pending": final.pending,
+                                         "drained": False, "reason": "shutdown_cancel"}
+
+    def gemma_drain_budget(self, requested_budget_s: float | None = None) -> float:
+        if self.gemma_worker is None:
+            return 0.0
+        if requested_budget_s is not None:
+            return requested_budget_s
+        return default_drain_timeout_seconds(self.gemma_worker.client.config.timeout_s,
+                                             pending_requests=self.gemma_worker.stats().pending)
 
     @property
     def consumer_alive(self) -> bool:

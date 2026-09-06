@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import io
 import json
+import subprocess
 import sys
 import unittest
 import wave
@@ -14,7 +16,8 @@ sys.path.insert(0, str(ROOT))
 
 from glitch_poc.contracts import DSPCandidate, PCMBlock
 from glitch_poc.dsp import DSPProcessor, DSPProfile, EventBuilder
-from tools.dsp_metrics import canonicalize, latency, matches
+from glitch_poc.ingest import ffmpeg_command, pcm_blocks
+from tools.dsp_metrics import canonicalize, fixture_report, latency, matches
 
 
 def fixture_blocks(name: str, block_frames: int = 1024) -> list[PCMBlock]:
@@ -28,6 +31,16 @@ def fixture_blocks(name: str, block_frames: int = 1024) -> list[PCMBlock]:
 def analyze(name: str, block_frames: int = 1024) -> tuple[DSPProcessor, list[object]]:
     processor, records = DSPProcessor(), []
     for block in fixture_blocks(name, block_frames):
+        records.extend(processor.process(block))
+    records.extend(processor.finish())
+    return processor, records
+
+
+def analyze_ffmpeg(name: str, block_frames: int) -> tuple[DSPProcessor, list[object]]:
+    process = subprocess.run(ffmpeg_command(str(ROOT / "fixtures" / "audio" / name), realtime=False),
+                             capture_output=True, check=True, timeout=30)
+    processor, records = DSPProcessor(), []
+    for block in pcm_blocks(io.BytesIO(process.stdout), stream_id="harvard", block_frames=block_frames):
         records.extend(processor.process(block))
     records.extend(processor.finish())
     return processor, records
@@ -170,6 +183,58 @@ class FixtureAndMetricTests(unittest.TestCase):
             self.assertTrue(any(event.status == "detected" and matches(event, truth) for event in events), truth)
         _, clean = analyze("poc_clean.wav")
         self.assertFalse(any(event.status == "detected" for event in canonicalize(clean)))
+
+    def test_rock_fixture_matches_four_faults_for_supported_block_sizes(self) -> None:
+        manifest = json.loads((ROOT / "fixtures" / "audio" / "poc_rock_v1_ground_truth.json").read_text())
+        truth = [(fault["class"], fault["interval"]["start"], fault["interval"]["end"])
+                 for fault in manifest["faults"]]
+        for block_size in (480, 512, 1024, 2048):
+            _, records = analyze("poc_rock_v1_corrupted.wav", block_size)
+            observed = canonicalize(records)
+            matched = [event for event in observed if any(matches(event, item) for item in truth)]
+            self.assertEqual(len(matched), 4, (block_size, [(item.glitch_type, item.status) for item in observed]))
+            self.assertEqual({item.glitch_type for item in matched}, {"click", "dropout", "stutter", "clipping"})
+            self.assertEqual(next(item.status for item in matched if item.glitch_type == "dropout"), "uncertain")
+            for kind in ("click", "stutter", "clipping"):
+                self.assertEqual(next(item.status for item in matched if item.glitch_type == kind), "detected")
+        _, clean = analyze("poc_rock_v1_clean.wav")
+        clean_events = canonicalize(clean)
+        self.assertFalse(any(event.status == "detected" for event in clean_events))
+        self.assertTrue(any(event.glitch_type == "dropout" and event.status == "uncertain" for event in clean_events))
+
+    def test_rock_metrics_separate_expected_uncertainty_from_detected_recall(self) -> None:
+        report = fixture_report("poc_rock_v1_ground_truth.json")
+        self.assertEqual(report["detected"], {"tp": 3, "fp": 0, "fn": 1, "precision": 1.0, "recall": .75,
+                         "recall_denominator_faults": 4})
+        self.assertEqual(report["uncertain_expected"], {"faults": 1, "corrupted_controls": 1, "clean_controls": 1, "total": 3})
+        self.assertEqual(report["uncertain_unexpected"], {"corrupted": 0, "clean": 0, "total": 0})
+
+    def test_harvard_ffmpeg_runtime_matches_injections_and_declared_baseline(self) -> None:
+        manifest = json.loads((ROOT / "fixtures" / "audio" / "poc_harvard_v1_ground_truth.json").read_text())
+        truth = [(item["class"], item["runtime_interval"]["start"], item["runtime_interval"]["end"])
+                 for item in manifest["faults"]]
+        baseline = [(item["class"], *item["runtime_interval"]) for item in manifest["baseline_events"]]
+        for size in (480, 512, 1024, 2048):
+            _, records = analyze_ffmpeg("poc_harvard_v1_corrupted.wav", size)
+            events = canonicalize(records)
+            injected = [event for event in events if any(matches(event, item) for item in truth)]
+            declared_baseline = [event for event in events if any(matches(event, item) for item in baseline)]
+            self.assertEqual(len(injected), 4, (size, [(event.glitch_type, event.status) for event in events]))
+            self.assertTrue(all(event.status == "detected" for event in injected))
+            self.assertEqual(len(declared_baseline), 3)
+            self.assertEqual(len(events), len(injected) + len(declared_baseline))
+        _, clean_records = analyze_ffmpeg("poc_harvard_v1_clean.wav", 1024)
+        clean = canonicalize(clean_records)
+        self.assertEqual(len(clean), 3)
+        self.assertTrue(all(any(matches(event, item) for item in baseline) for event in clean))
+
+    def test_harvard_metrics_exclude_declared_baseline_and_keep_naive_count(self) -> None:
+        report = fixture_report("poc_harvard_v1_ground_truth.json")
+        self.assertEqual(report["detected"], {"tp": 4, "fp": 0, "fn": 0, "precision": 1.0, "recall": 1.0,
+                         "recall_denominator_faults": 4})
+        self.assertEqual(report["false_alarm"]["count"], 0)
+        self.assertEqual(report["naive_detected_false_alarm"], {"count": 4, "declared_baseline_excluded": 4})
+        self.assertEqual(report["uncertain_unexpected"]["total"], 0)
 
     def test_metrics_matching_rejects_duplicate_and_class_mismatch(self) -> None:
         _, records = analyze("poc_corrupted.wav")

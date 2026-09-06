@@ -1,0 +1,226 @@
+{
+  "baseline_events": [
+    {
+      "class": "clipping",
+      "runtime_interval": [
+        261120,
+        263520
+      ],
+      "status": "detected"
+    },
+    {
+      "class": "clipping",
+      "runtime_interval": [
+        511200,
+        513600
+      ],
+      "status": "detected"
+    },
+    {
+      "class": "dropout",
+      "runtime_interval": [
+        379200,
+        390240
+      ],
+      "status": "uncertain"
+    }
+  ],
+  "controls": [
+    {
+      "expected_status": "clean",
+      "name": "plosive",
+      "runtime_interval": [
+        68571,
+        70400
+      ],
+      "source_interval": [
+        63000,
+        64680
+      ]
+    },
+    {
+      "expected_status": "clean",
+      "name": "sibilant",
+      "runtime_interval": [
+        232800,
+        235200
+      ],
+      "source_interval": [
+        213885,
+        216090
+      ]
+    },
+    {
+      "expected_status": "clean",
+      "name": "long_pause",
+      "runtime_interval": [
+        184320,
+        204800
+      ],
+      "source_interval": [
+        169344,
+        188160
+      ]
+    },
+    {
+      "expected_status": "uncertain",
+      "name": "ambiguous_natural_pause",
+      "runtime_interval": [
+        379593,
+        384994
+      ],
+      "source_interval": [
+        348751,
+        353713
+      ]
+    },
+    {
+      "expected_status": "unverified_non_scored",
+      "name": "repeated_word",
+      "runtime_interval": [
+        0,
+        0
+      ],
+      "source_interval": [
+        0,
+        0
+      ]
+    }
+  ],
+  "faults": [
+    {
+      "class": "click",
+      "expected_status": "detected",
+      "formula": "0.80*exp(-k/8)*cos(pi*k)",
+      "interval": {
+        "end": 132344,
+        "semantics": "half-open",
+        "start": 132300,
+        "unit": "frames"
+      },
+      "runtime_interval": {
+        "end": 144048,
+        "sample_rate_hz": 48000,
+        "semantics": "half-open",
+        "start": 144000,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 2.7571666666666665,
+        "start": 2.75625
+      },
+      "source_sample_rate_hz": 44100
+    },
+    {
+      "class": "dropout",
+      "expected_status": "detected",
+      "fade_in_frames": 221,
+      "fade_out_frames": 221,
+      "interval": {
+        "end": 98784,
+        "semantics": "half-open",
+        "start": 88200,
+        "unit": "frames"
+      },
+      "runtime_interval": {
+        "end": 107520,
+        "sample_rate_hz": 48000,
+        "semantics": "half-open",
+        "start": 96000,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 2.058,
+        "start": 1.8375
+      },
+      "source_sample_rate_hz": 44100,
+      "zero_interval": {
+        "end": 98563,
+        "start": 88421
+      }
+    },
+    {
+      "class": "stutter",
+      "expected_status": "detected",
+      "interval": {
+        "end": 527436,
+        "semantics": "half-open",
+        "start": 506268,
+        "unit": "frames"
+      },
+      "repetitions": 6,
+      "runtime_interval": {
+        "end": 574080,
+        "sample_rate_hz": 48000,
+        "semantics": "half-open",
+        "start": 551040,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 10.98825,
+        "start": 10.54725
+      },
+      "source_interval": {
+        "end": 506268,
+        "start": 502740
+      },
+      "source_sample_rate_hz": 44100
+    },
+    {
+      "class": "clipping",
+      "expected_status": "detected",
+      "interval": {
+        "end": 610785,
+        "semantics": "half-open",
+        "start": 593145,
+        "unit": "frames"
+      },
+      "plateau": 0.46,
+      "ramp_frames": 882,
+      "runtime_interval": {
+        "end": 664800,
+        "sample_rate_hz": 48000,
+        "semantics": "half-open",
+        "start": 645600,
+        "unit": "frames"
+      },
+      "seconds": {
+        "end": 12.7246875,
+        "start": 12.3571875
+      },
+      "source_sample_rate_hz": 44100
+    }
+  ],
+  "files": {
+    "clean": {
+      "path": "poc_harvard_v1_clean.wav",
+      "sha256": "971b4163670445c415c6b0fb6813c38093409ecac2f6b4d429ae3574d24ad470"
+    },
+    "corrupted": {
+      "path": "poc_harvard_v1_corrupted.wav",
+      "sha256": "5aa8f3fe6a9e0a43b66ee9d0df998571f3eb29f6c73db6fee804f1c7cbc0c688"
+    }
+  },
+  "format": {
+    "channels": 2,
+    "codec": "PCM s16le",
+    "container": "WAV",
+    "duration_seconds": 18.356190476190477,
+    "frames": 809508,
+    "sample_rate_hz": 44100
+  },
+  "identifiability_limits": [
+    "Baseline speech events are declared, not injected faults.",
+    "The DSP runtime does not use the clean/reference waveform.",
+    "One source clip is insufficient for operational rates."
+  ],
+  "profile_id": "poc-d2-v2",
+  "schema_version": 3,
+  "source": {
+    "frames": 809508,
+    "path": "harvard.wav",
+    "runtime_sample_rate_hz": 48000,
+    "sample_rate_hz": 44100,
+    "sha256": "971b4163670445c415c6b0fb6813c38093409ecac2f6b4d429ae3574d24ad470"
+  }
+}

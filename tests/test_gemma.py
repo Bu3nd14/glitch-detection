@@ -139,6 +139,26 @@ class GemmaTests(unittest.TestCase):
         self.assertEqual(event().status, "uncertain")
         self.assertEqual(len(annotations), 1)
 
+    def test_runtime_drain_budget_scales_pending_and_honors_explicit_override(self) -> None:
+        from glitch_poc.ring import PCMBlockRing
+        from glitch_poc.runtime import SliceRuntime
+        annotations: list[GemmaAnnotation] = []
+        worker = GemmaWorker(SpawnSuccessClient(), annotations.append)  # type: ignore[arg-type]
+        runtime = SliceRuntime(PCMBlockRing(2, 4), type("Producer", (), {"state": "eof", "error": None})(), gemma_worker=worker)
+        for revision in range(1, 8):
+            self.assertTrue(worker.submit(event(revision), evidence()))
+        self.assertAlmostEqual(runtime.gemma_drain_budget(), 3.7)
+        self.assertEqual(runtime.gemma_drain_budget(.25), .25)
+        worker.start()
+        runtime.stop(graceful_gemma_drain=True)
+        self.assertEqual(len(annotations), 7)
+        self.assertEqual(runtime.last_gemma_drain, {
+            "requested_budget_s": None, "override_budget_s": None, "per_request_timeout_s": .1, "overhead_s": 3,
+            "effective_budget_s": 3.7, "accepted_pending_initial": 7, "accepted_pending_final": 0, "pending_at_start": 7,
+            "submitted": 7, "completed": 7, "errors": 0, "cancelled_pending": 0, "pending": 0,
+            "drained": True, "reason": "shutdown_complete",
+        })
+
     def test_shutdown_terminates_blocked_client_and_cancels_pending(self) -> None:
         annotations = []
         worker = GemmaWorker(SpawnBlockedClient(), annotations.append)  # type: ignore[arg-type]

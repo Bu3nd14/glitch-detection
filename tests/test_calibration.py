@@ -28,9 +28,10 @@ class CalibrationTests(unittest.TestCase):
         self.assertEqual(proposed_timeout_seconds([.01]), 5)
         self.assertEqual(proposed_timeout_seconds([100]), 60)
 
-    def test_drain_budget_covers_four_serial_requests_and_overhead(self) -> None:
-        self.assertEqual(default_drain_timeout_seconds(5), 23)
-        self.assertEqual(default_drain_timeout_seconds(2), 15)
+    def test_drain_budget_scales_only_accepted_pending_requests(self) -> None:
+        self.assertEqual(default_drain_timeout_seconds(10, pending_requests=4), 43)
+        self.assertEqual(default_drain_timeout_seconds(10, pending_requests=7), 73)
+        self.assertEqual(default_drain_timeout_seconds(10, pending_requests=0), 0)
 
     def test_four_class_policy_requires_all_valid_classes(self) -> None:
         types = frozenset({"click", "dropout", "stutter", "clipping"})
