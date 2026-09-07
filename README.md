@@ -2,7 +2,7 @@
 
 This repository contains a local, deterministic proof of concept for audio glitch detection.
 It streams a fixture WAV through persistent FFmpeg, turns it into normalized stereo PCM at 48 kHz,
-processes 10 ms DSP hops, and writes append-only audit records using a local LLM running on Ollama. The runtime is for inspection,
+processes 10 ms DSP hops, and writes append-only audit records. The runtime is for inspection,
 calibration, and local validation, not for repair or production deployment.
 
 It runs on the original, rock-like, and Harvard fixture pairs, or on a readable local audio file supported by FFmpeg.
